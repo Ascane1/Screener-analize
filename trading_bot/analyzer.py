@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from decimal import Decimal
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
 from enum import Enum
@@ -69,27 +70,43 @@ class RelativePerformanceFilter:
         
         # Используем session_length или всю длину
         length = session_length or len(asset_prices)
+        length = min(length, len(asset_prices), len(benchmark_prices))
         
         asset_slice = asset_prices[-length:]
         benchmark_slice = benchmark_prices[-length:]
         
-        # Расчёт доходностей
+        # Расчёт доходностей (как в Pine: (close - open)/open для первого бара, (close - close[1])/close[1] для остальных)
+        # В Pine: assetReturn = sessionStart ? (close - open)/open : (close - close[1])/close[1]
+        # Для фиксированного окна мы можем упростить до (p[i] - p[i-1])/p[i-1]
         asset_returns = self.calculate_returns(asset_slice)
         benchmark_returns = self.calculate_returns(benchmark_slice)
         
+        # В Pine: assetReturn для первого бара сессии считается от open. 
+        # Мы имитируем это, корректируя первый элемент доходностей.
+        # asset_returns[0] сейчас 0. Мы заменим его на доходность относительно "предыдущего" закрытия, 
+        # но так как у нас срез, мы просто оставим как есть или будем считать от первой цены среза.
+        
         if self.display_mode == DisplayMode.STANDARDIZED:
-            # Стандартизированные доходности
-            asset_std = np.std(asset_returns)
+            # Стандартизированные доходности (Pine: benchmarkReturns.standardize())
+            # В Pine .standardize() использует смещенную оценку (ddof=0)
+            asset_std = np.std(asset_returns, ddof=0)
             if asset_std == 0:
                 asset_std = 1
             
-            standardized_benchmark = self.standardize(benchmark_returns)
+            # Стандартизация бенчмарка
+            mean_b = np.mean(benchmark_returns)
+            std_b = np.std(benchmark_returns, ddof=0)
+            if std_b == 0:
+                standardized_benchmark = np.zeros_like(benchmark_returns)
+            else:
+                standardized_benchmark = (benchmark_returns - mean_b) / std_b
+                
             cumulative_benchmark = np.sum(standardized_benchmark * asset_std)
         
         elif self.display_mode == DisplayMode.NORMALIZED:
             # Нормализованные доходности
-            asset_std = np.std(asset_returns)
-            benchmark_std = np.std(benchmark_returns)
+            asset_std = np.std(asset_returns, ddof=0)
+            benchmark_std = np.std(benchmark_returns, ddof=0)
             
             if benchmark_std == 0:
                 ratio = 1
@@ -102,6 +119,7 @@ class RelativePerformanceFilter:
             cumulative_benchmark = np.sum(benchmark_returns)
         
         # Сравнение: текущая цена vs ожидаемая на основе бенчмарка
+        # В Pine: openPrice - это цена открытия СЕССИИ.
         open_price = asset_slice[0]
         close_price = asset_slice[-1]
         expected_price = open_price * (1 + cumulative_benchmark)
@@ -165,7 +183,9 @@ class MultiKernelAnalyzer:
             logger.warning(f"Could not fetch benchmark {config.BENCHMARK_SYMBOL}")
             return np.array([])
         
-        prices = df['close'].values
+        # Используем hlc3 для бенчмарка для консистентности с активами
+        df['hlc3'] = (df['high'] + df['low'] + df['close']) / 3
+        prices = df['hlc3'].values
         self._benchmark_cache[cache_key] = prices
         
         return prices
@@ -203,7 +223,7 @@ class MultiKernelAnalyzer:
         """Рассчитать все индикаторы"""
         df = df.copy()
 
-        # Используем hlc3 как источник данных (high + low + close) / 3
+        # Пользователь хочет использовать hlc3
         df['hlc3'] = (df['high'] + df['low'] + df['close']) / 3
         prices = df['hlc3'].values
 
@@ -214,8 +234,9 @@ class MultiKernelAnalyzer:
         df['kernel_direction'] = df['kernel_ma'].diff()
         
         # Crossover/Crossunder
-        df['kernel_cross_up'] = (df['kernel_direction'] > 0) & (df['kernel_direction'].shift(1) <= 0)
-        df['kernel_cross_down'] = (df['kernel_direction'] < 0) & (df['kernel_direction'].shift(1) >= 0)
+        # В Pine: ta.crossover(nrp_sum, nrp_sum[1])
+        df['kernel_cross_up'] = (df['kernel_ma'] > df['kernel_ma'].shift(1)) & (df['kernel_ma'].shift(1) <= df['kernel_ma'].shift(2))
+        df['kernel_cross_down'] = (df['kernel_ma'] < df['kernel_ma'].shift(1)) & (df['kernel_ma'].shift(1) >= df['kernel_ma'].shift(2))
         
         return df
     
@@ -241,13 +262,12 @@ class MultiKernelAnalyzer:
             logger.warning(f"No benchmark data for {symbol}")
             return None
         
-        # Используем hlc3 для расчета зон и сигналов
-        df['hlc3'] = (df['high'] + df['low'] + df['close']) / 3
-        asset_prices = df['hlc3'].values
+        # Пользователь хочет использовать hlc3 для всего, включая расчет зон
+        asset_prices_for_zone = df['hlc3'].values
 
         # Определяем зону (Green/Red)
         is_green_zone = self.performance_filter.is_outperforming(
-            asset_prices,
+            asset_prices_for_zone,
             benchmark_prices,
             session_length=config.SESSION_LENGTH
         )
@@ -267,12 +287,17 @@ class MultiKernelAnalyzer:
         
         # LONG: crossover + Green Zone
         if cross_up and is_green_zone:
-            stop_loss = current_price * (1 - config.SL_PERCENT / 100)
-            take_profit = current_price * (1 + config.TP_PERCENT / 100)
+            # Используем Decimal для точных расчетов
+            current_price_dec = Decimal(str(current_price))
+            sl_percent = Decimal(str(config.SL_PERCENT))
+            tp_percent = Decimal(str(config.TP_PERCENT))
+            
+            stop_loss = float(current_price_dec * (Decimal('1') - sl_percent / Decimal('100')))
+            take_profit = float(current_price_dec * (Decimal('1') + tp_percent / Decimal('100')))
             
             # Сила сигнала на основе относительной производительности
             perf_ratio = self.performance_filter.get_performance_ratio(
-                asset_prices, benchmark_prices
+                asset_prices_for_zone, benchmark_prices
             )
             strength = min(abs(perf_ratio) * 10, 1.0)  # Нормализуем до 0-1
             
@@ -288,13 +313,18 @@ class MultiKernelAnalyzer:
                 reason=f"Kernel crossover UP + Green Zone (outperforming by {perf_ratio*100:.2f}%)"
             )
         
-        # SHORT: crossunder + Red Zone  
+        # SHORT: crossunder + Red Zone
         elif cross_down and is_red_zone:
-            stop_loss = current_price * (1 + config.SL_PERCENT / 100)
-            take_profit = current_price * (1 - config.TP_PERCENT / 100)
+            # Используем Decimal для точных расчетов
+            current_price_dec = Decimal(str(current_price))
+            sl_percent = Decimal(str(config.SL_PERCENT))
+            tp_percent = Decimal(str(config.TP_PERCENT))
+            
+            stop_loss = float(current_price_dec * (Decimal('1') + sl_percent / Decimal('100')))
+            take_profit = float(current_price_dec * (Decimal('1') - tp_percent / Decimal('100')))
             
             perf_ratio = self.performance_filter.get_performance_ratio(
-                asset_prices, benchmark_prices
+                asset_prices_for_zone, benchmark_prices
             )
             strength = min(abs(perf_ratio) * 10, 1.0)
             

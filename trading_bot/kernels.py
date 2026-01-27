@@ -162,9 +162,11 @@ class KernelRegression:
             return prices[-1] if len(prices) > 0 else 0.0
         
         # Берём последние bandwidth значений
+        # В Pine Script: sum += nz(src[i]) * weight, где i от 0 до bw-1
+        # src[0] - текущая цена, src[1] - предыдущая
         recent_prices = prices[-self.bandwidth:]
         
-        # Взвешенная сумма
+        # Взвешенная сумма (recent_prices[::-1] дает [текущая, пред, ...])
         weighted_sum = np.sum(recent_prices[::-1] * self._weights)
         
         return weighted_sum / self._sum_weights
