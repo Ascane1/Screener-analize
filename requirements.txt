@@ -1,0 +1,3 @@
+python-dotenv
+pybit
+requests>=2.31.0

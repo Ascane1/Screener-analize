@@ -1,0 +1,565 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © LuxAlgo
+
+//@version=6
+indicator("Multi Kernel Regression + Relative Performance [Ascane]", overlay = true, max_lines_count = 500, max_bars_back = 500, max_labels_count = 500, max_boxes_count = 500, max_polylines_count = 100)
+
+// ============================================
+// DATA STRUCTURES
+// ============================================
+type filter_session
+    int startTime
+    int endTime
+    float openPrice
+    float closePrice
+    float top
+    float bottom
+    box area
+    float benchmarkTop
+    float benchmarkBottom
+    box benchmarkArea
+    array<int> times
+    array<float> assetReturns
+    array<float> benchmarkReturns
+    array<chart.point> benchmarkPoints
+    polyline benchmarkLine              = na
+    float cumulativeBenchmarkReturns    = na
+    line topLine                        = na
+    line bottomLine                     = na
+
+type coefficients
+    float[] weights
+    float sumw
+
+// ============================================
+// GLOBAL VARIABLES
+// ============================================
+var array<filter_session> sessions      = array.new<filter_session>()
+var array<int> overperformingSessions   = array.new<int>()
+var array<int> winningStreaks           = array.new<int>()
+var array<int> losingStreaks            = array.new<int>()
+
+isGreenZone_series = false
+isRedZone_series   = false
+var array<bool> zone_history = array.new<bool>(500, false)
+
+// ============================================
+// CONSTANTS
+// ============================================
+FILTER_GREEN            = #089981
+FILTER_RED              = #F23645
+FILTER_GREEN_80         = color.new(FILTER_GREEN, 80)
+FILTER_RED_80           = color.new(FILTER_RED, 80)
+
+NET_RETURN              = 'Net Returns'
+NORMALIZED              = 'Rescaled Returns'
+STANDARDIZED            = 'Standardized Returns'
+
+TOP_RIGHT               = 'Top Right'
+BOTTOM_RIGHT            = 'Bottom Right'
+BOTTOM_LEFT             = 'Bottom Left'
+
+TINY                    = 'Tiny'
+SMALL                   = 'Small'
+NORMAL                  = 'Normal'
+LARGE                   = 'Large'
+HUGE                    = 'Huge'
+
+DASHBOARD_GROUP         = 'Dashboard'
+STYLE_GROUP             = 'Style'
+SESSION_GROUP           = 'Session Settings'
+
+EM_SPACE                = ' '
+EN_SPACE                = ' '
+FOUR_PER_EM_SPACE       = ' '
+HAIR_SPACE              = ' '
+
+FILTER_bullishSpacing   = EM_SPACE + FOUR_PER_EM_SPACE + HAIR_SPACE
+FILTER_bearishSpacing   = EN_SPACE + FOUR_PER_EM_SPACE + HAIR_SPACE
+
+// ============================================
+// INPUTS
+// ============================================
+// Section 1: Regression Inputs
+repaint     = input.bool(true, "Repaint")
+kernel_sel  = input.string("Laplace", "Kernel Select", ["Triangular", "Gaussian", "Epanechnikov", "Logistic", "Log Logistic", "Cosine", "Sinc", "Laplace", "Quartic", "Parabolic", "Exponential", "Silverman", "Cauchy", "Tent", "Wave", "Power", "Morters"])
+bandwidth   = input.int(14, 'Bandwidth', 1)
+source      = input.source(close, 'Source')
+deviations  = input.float(2.0, 'Deviation', 0, 100, 0.25, inline = "dev")
+style       = input.string("Solid", "Line Style", ["Solid", "Dotted", "Dashed"])
+enable      = input.bool(false, "", inline = "dev")
+label_size  = input.string("Tiny", "Labels", ["Auto", "Tiny", "Small", "Normal", "Large", "Huge"], inline = "label")
+labels      = input.bool(true, "", inline = "label")
+bullish_color = input.color(color.rgb(84, 194, 148), "Colors", inline = "color")
+bearish_color = input.color(color.rgb(235, 57, 57), "", inline = "color")
+text_color  = input.color(color.rgb(8, 12, 20), "", inline = "color")
+
+slPercent   = input.float(1.0, "Stop Loss Percent", minval=0.01, step=0.1)
+tpPercent   = input.float(2.0, "Take Profit Percent", minval=0.01, step=0.1)
+
+// Section 2: Filter Inputs
+benchmarkInput          = input.symbol('TVC:SPX', 'Benchmark')
+
+// Section 3: Session Inputs
+sessionTypeInput        = input.string("Exchange Session", "Session Type", options = ["Exchange Session", "Fixed Hours"], group=SESSION_GROUP)
+fixedSessionHoursInput  = input.int(12, "Session Hours", minval = 1, maxval = 24, group=SESSION_GROUP, inline = "session")
+displayModeInput        = input.string(STANDARDIZED, 'Display Mode', options = [NET_RETURN, NORMALIZED, STANDARDIZED])
+dashboardInput          = input.bool(false, 'Dashboard', group=DASHBOARD_GROUP)
+dashboardPositionInput  = input.string(TOP_RIGHT, 'Position', group=DASHBOARD_GROUP, options = [TOP_RIGHT, BOTTOM_RIGHT, BOTTOM_LEFT])
+dashboardSizeInput      = input.string(NORMAL, 'Size', group=DASHBOARD_GROUP, options = [TINY, SMALL, NORMAL, LARGE, HUGE])
+
+showBullishInput        = input.bool(true, 'Overperforming', group = STYLE_GROUP, inline = 'bullish')
+FILTER_bullishColorInput = input.color(FILTER_GREEN_80, FILTER_bullishSpacing, group = STYLE_GROUP, inline = 'bullish')
+showBearishInput        = input.bool(true, 'Underperforming', group = STYLE_GROUP, inline = 'bearish')
+FILTER_bearishColorInput = input.color(FILTER_RED_80, FILTER_bearishSpacing, group = STYLE_GROUP, inline = 'bearish')
+
+showBenchmarkInput      = input.bool(true, 'Benchmark', group = STYLE_GROUP, inline = 'benchmark')
+FILTER_benchBullColorInput = input.color(FILTER_GREEN, '', group = STYLE_GROUP, inline = 'benchmark')
+FILTER_benchBearColorInput = input.color(FILTER_RED, '', group = STYLE_GROUP, inline = 'benchmark')
+
+// ============================================
+// HELPER CALCULATIONS
+// ============================================
+size = switch label_size
+    "Auto"   => size.auto
+    "Tiny"   => size.tiny
+    "Small"  => size.small
+    "Normal" => size.normal
+    "Large"  => size.large
+    "Huge"   => size.huge
+
+line_style = switch style 
+    "Solid"  => line.style_solid
+    "Dotted" => line.style_dotted
+    "Dashed" => line.style_dashed
+
+var parsedDashboardPosition = switch dashboardPositionInput
+    TOP_RIGHT       => position.top_right
+    BOTTOM_RIGHT    => position.bottom_right
+    BOTTOM_LEFT     => position.bottom_left
+
+var parsedDashboardSize = switch dashboardSizeInput
+    TINY            => size.tiny
+    SMALL           => size.small
+    NORMAL          => size.normal
+    LARGE           => size.large
+    HUGE            => size.huge
+
+sessionStart = switch sessionTypeInput
+    "Exchange Session" => session.isfirstbar_regular
+    "Fixed Hours"      => ta.change(time(str.tostring(fixedSessionHoursInput * 60))) != 0 // Detects start of X-hour interval in UTC
+
+// ============================================
+// KERNEL FUNCTIONS
+// ============================================
+sq(src) => math.pow(src, 2)
+
+gaussian(src, bw) => math.exp(-sq(src / bw) / 2) / math.sqrt(2 * math.pi) 
+triangular(src, bw) => math.abs(src/bw) <= 1 ? 1 - math.abs(src/bw) : 0.0
+epanechnikov(src, bw) => math.abs(src/bw) <= 1 ? (3/4.) * (1 - sq(src/bw)) : 0.0
+quartic(src, bw) => math.abs(src/bw) <= 1 ? 15/16. * math.pow(1 - sq(src/bw), 2) : 0.0
+logistic(src, bw) => 1 / (math.exp(src / bw) + 2 + math.exp(-src / bw))
+cosine(src, bw) => math.abs(src/bw) <= 1 ? (math.pi / 4) * math.cos((math.pi / 2) * (src/bw)) : 0.0
+laplace(src, bw) => (1 / (2 * bw)) * math.exp(-math.abs(src/bw))
+exponential(src, bw) => (1 / bw) * math.exp(-math.abs(src/bw))
+silverman(src, bw) => math.abs(src/bw) <= 0.5 ? 0.5 * math.exp(-(src/bw)/2) * math.sin((src/bw)/2 + math.pi/4) : 0.0 
+tent(src, bw) => math.abs(src/bw) <= 1 ? 1 - math.abs(src/bw) : 0.0
+cauchy(src, bw) => 1 / (math.pi * bw * (1 + sq(src / bw)))
+sinc(src, bw) => src == 0 ? 1 : math.sin(math.pi * src / bw) / (math.pi * src / bw)
+wave(src, bw) => math.abs(src/bw) <= 1 ? (1 - math.abs(src/bw)) * math.cos((math.pi * src) / bw) : 0.0
+parabolic(src, bw) => math.abs(src/bw) <= 1 ? 1 - math.pow((src/bw), 2) : 0.0
+power(src, bw) => math.abs(src/bw) <= 1 ? math.pow(1 - math.pow(math.abs(src/bw), 3), 3) : 0.0
+loglogistic(src, bw) => 1 / math.pow(1 + math.abs(src / bw), 2)
+morters(src, bw) => math.abs(src / bw) <= math.pi ? (1 + math.cos(src / bw)) / (2 * math.pi * bw) : 0.0
+
+kernel_func(src, bw, st)=>
+    switch st
+        "Triangular"    => triangular(src, bw)
+        "Gaussian"      => gaussian(src, bw)
+        "Epanechnikov"  => epanechnikov(src, bw)
+        "Logistic"      => logistic(src, bw)
+        "Log Logistic"  => loglogistic(src, bw)
+        "Cosine"        => cosine(src, bw)
+        "Sinc"          => sinc(src, bw)
+        "Laplace"       => laplace(src, bw)
+        "Quartic"       => quartic(src, bw)
+        "Parabolic"     => parabolic(src, bw)
+        "Exponential"   => exponential(src, bw)
+        "Silverman"     => silverman(src, bw)
+        "Cauchy"        => cauchy(src, bw)
+        "Tent"          => tent(src, bw)
+        "Wave"          => wave(src, bw)
+        "Power"         => power(src, bw)
+        "Morters"       => morters(src, bw)
+
+// ============================================
+// REGRESSION FUNCTIONS
+// ============================================
+precalculate(float bw, string krn)=>
+    var coefficients[] c = array.new<coefficients>()
+    if barstate.isfirst
+        for i = 0 to 499
+            coefficients w = coefficients.new(array.new<float>(), 0)
+            float sumw = 0
+            for j = 0 to 499
+                diff = i - j
+                weight = kernel_func(diff, bw, krn)
+                sumw += weight
+                w.weights.push(weight)
+            w.sumw := sumw
+            c.push(w)
+    c
+
+precalculate_nrp(bw, krn)=>
+    var float[] weights = array.new<float>()
+    var float sumw = 0
+    if barstate.isfirst
+        for i = 0 to bw - 1
+            j = math.pow(i, 2) / (math.pow(bw, 2))
+            weight = kernel_func(j, 1, krn)
+            weights.push(weight)
+            sumw += weight
+    [weights, sumw]
+
+multi_kernel_regression(src, bw, devs, krn, lbls, en, l_style, t_color, bull_c, bear_c, sz, rep, isG, isR, hist)=>
+    var estimate_array = array.new<line>(500, line.new(na, na, na, na))
+    var dev_upper_array = array.new<line>(500, line.new(na, na, na, na))
+    var dev_lower_array = array.new<line>(500, line.new(na, na, na, na))
+    var up_labels = array.new<label>(500, label.new(na, na))
+    var down_labels = array.new<label>(500, label.new(na, na))
+
+    float current_price = na
+    float previous_price = na
+    float previous_price_delta = na
+    float std_dev = na
+    float upper_1 = na
+    float lower_1 = na
+    float upper_2 = na
+    float lower_2 = na
+    line estimate = na
+    line dev_upper = na
+    line dev_lower = na
+    label bullish = na
+    label bearish = na
+    float nrp_sum = na
+    float nrp_stdev = na
+    color nrp_color = na
+
+    if not rep
+        [weights, sumw] = precalculate_nrp(bw, krn)
+        float sum   = 0.0
+        float sumsq = 0.0
+        for i = 0 to bw - 1
+            weight = weights.get(i)
+            sum += nz(src[i]) * weight
+        nrp_sum := sum / sumw
+        direction = nrp_sum - nrp_sum[1] > 0
+        nrp_color := direction ? bull_c : bear_c
+        for i = 0 to bw - 1
+            sumsq += math.pow(src[i] - nrp_sum[i], 2)
+        nrp_stdev := math.sqrt(sumsq / (bw - 1)) * devs
+        if lbls
+            if ta.crossover(nrp_sum, nrp_sum[1]) and isG
+                label.new(bar_index, nrp_sum, "Up", xloc.bar_index, yloc.belowbar, bull_c, label.style_label_up, t_color, sz)
+            if ta.crossunder(nrp_sum, nrp_sum[1]) and isR
+                label.new(bar_index, nrp_sum, "Down", xloc.bar_index, yloc.abovebar, bear_c, label.style_label_down, t_color, sz)
+        [nrp_sum, nrp_color, nrp_stdev]
+    else
+        coefficients[] c = precalculate(bw, krn)
+        if barstate.isfirst
+            for i = 499 to 0
+                array.set(estimate_array, i, line.new(na, na, na, na))
+                if en
+                    array.set(dev_upper_array, i, line.new(na, na, na, na))
+                    array.set(dev_lower_array, i, line.new(na, na, na, na))
+                if lbls
+                    array.set(up_labels, i, label.new(na, na))
+                    array.set(down_labels,i,  label.new(na, na))    
+
+        if barstate.islast
+            for i = 0 to math.min(bar_index, 499)
+                coefficient = c.get(i)
+                float sum = 0
+                float sumsq = 0
+                for j = 0 to math.min(bar_index, 499)
+                    diff = i - j
+                    weight = coefficient.weights.get(j)
+                    sum += src[j] * weight
+                    sumsq += sq(src[j]) * weight
+
+                current_price := sum / coefficient.sumw
+                delta = current_price - previous_price
+
+                if en
+                    std_dev := math.sqrt(math.max(sumsq / coefficient.sumw - sq(current_price), 0))
+                    upper_2 := current_price + devs * std_dev
+                    lower_2 := current_price - devs * std_dev
+
+                estimate := array.get(estimate_array, i)
+                if en
+                    dev_upper := array.get(dev_upper_array, i)
+                    dev_lower := array.get(dev_lower_array, i)
+
+                line.set_xy1(estimate, bar_index - i + 1, previous_price)
+                line.set_xy2(estimate, bar_index - i, current_price)
+                line.set_style(estimate, l_style)
+                line.set_color(estimate, current_price > previous_price ? bear_c : bull_c)
+                line.set_width(estimate, 3)
+
+                if en
+                    line.set_xy1(dev_upper, bar_index - i + 1, upper_1)
+                    line.set_xy2(dev_upper, bar_index - i , upper_2)
+                    line.set_style(dev_upper, l_style)
+                    line.set_color(dev_upper, current_price > previous_price ? bear_c : bull_c)
+                    line.set_width(dev_upper, 3)
+                    line.set_xy1(dev_lower, bar_index - i + 1, lower_1)
+                    line.set_xy2(dev_lower, bar_index - i , lower_2)
+                    line.set_style(dev_lower, l_style)
+                    line.set_color(dev_lower, current_price > previous_price ? bear_c : bull_c)
+                    line.set_width(dev_lower, 3)
+
+                if lbls
+                    bullish := array.get(up_labels, i)
+                    bearish := array.get(down_labels, i)
+                    bool barIsGreenZone = i == 0 ? isG : hist.get(499 - i)
+                    bool barIsRedZone = i == 0 ? isR : hist.get(499 - i)
+
+                    if delta > 0 and previous_price_delta < 0 and barIsGreenZone
+                        label.set_xy(bullish, bar_index - i + 1, src[i])
+                        label.set_text(bullish, 'Up')
+                        label.set_color(bullish, bull_c)
+                        label.set_textcolor(bullish, t_color)
+                        label.set_textalign(bullish, text.align_center)
+                        label.set_size(bullish, sz)
+                        label.set_style(bullish, label.style_label_up)
+                        label.set_yloc(bullish, yloc.belowbar)
+                    else
+                        label.set_xy(bullish, na, na)
+
+                    if delta < 0 and previous_price_delta > 0 and barIsRedZone
+                        label.set_xy(bearish, bar_index - i + 1, src[i])
+                        label.set_text(bearish, 'Down')
+                        label.set_textcolor(bearish, t_color)
+                        label.set_color(bearish, bear_c)
+                        label.set_textalign(bearish, text.align_center)
+                        label.set_size(bearish, sz)
+                        label.set_style(bearish, label.style_label_down)
+                        label.set_yloc(bearish, yloc.abovebar)
+                    else
+                        label.set_xy(bearish, na, na)
+
+                previous_price := current_price
+                upper_1 := upper_2
+                lower_1 := lower_2
+                previous_price_delta := delta
+
+        if barstate.isconfirmed
+            for i = array.size(up_labels) - 1 to 0
+                label.set_xy(array.get(up_labels, i), na, na)
+            for i = array.size(down_labels) - 1 to 0
+                label.set_xy(array.get(down_labels, i), na, na)
+    [nrp_sum, nrp_color, nrp_stdev]
+
+// ============================================
+// FILTER FUNCTIONS
+// ============================================
+netReturns(filter_session currentSession) =>
+    currentSession.cumulativeBenchmarkReturns   := currentSession.benchmarkReturns.sum()    
+    float currentBenchmarkPrice                 = currentSession.openPrice * (1 + currentSession.cumulativeBenchmarkReturns)
+    currentSession.benchmarkTop                 := math.max(currentSession.benchmarkTop,currentBenchmarkPrice)
+    currentSession.benchmarkBottom              := math.min(currentSession.benchmarkBottom,currentBenchmarkPrice)
+    currentSession.benchmarkPoints.push(chart.point.new(time,na,currentBenchmarkPrice))
+
+normalizedReturns(filter_session currentSession) =>    
+    float deviationRatio = currentSession.assetReturns.stdev()/currentSession.benchmarkReturns.stdev()    
+    currentSession.benchmarkPoints.clear()
+    currentSession.cumulativeBenchmarkReturns   := 0
+    currentSession.benchmarkTop                 := currentSession.openPrice
+    currentSession.benchmarkBottom              := currentSession.openPrice
+    for [index,eachReturn] in currentSession.benchmarkReturns
+        currentSession.cumulativeBenchmarkReturns   += eachReturn * deviationRatio
+        float currentBenchmarkPrice                 = currentSession.openPrice * (1 + currentSession.cumulativeBenchmarkReturns)
+        currentSession.benchmarkTop                 := math.max(currentSession.benchmarkTop,currentBenchmarkPrice)
+        currentSession.benchmarkBottom              := math.min(currentSession.benchmarkBottom,currentBenchmarkPrice)
+        currentSession.benchmarkPoints.push(chart.point.new(currentSession.times.get(index),na,index == 0 ? currentSession.openPrice : currentBenchmarkPrice))
+
+standarizedReturns(filter_session currentSession) =>
+    float assetDeviation = currentSession.assetReturns.stdev()
+    currentSession.benchmarkPoints.clear()
+    currentSession.cumulativeBenchmarkReturns   := 0
+    currentSession.benchmarkTop                 := currentSession.openPrice
+    currentSession.benchmarkBottom              := currentSession.openPrice
+    for [index,eachScore] in currentSession.benchmarkReturns.standardize()
+        currentSession.cumulativeBenchmarkReturns   += eachScore * assetDeviation
+        float currentBenchmarkPrice                 = currentSession.openPrice * (1 + currentSession.cumulativeBenchmarkReturns)
+        currentSession.benchmarkTop                 := math.max(currentSession.benchmarkTop,currentBenchmarkPrice)
+        currentSession.benchmarkBottom              := math.min(currentSession.benchmarkBottom,currentBenchmarkPrice)
+        currentSession.benchmarkPoints.push(chart.point.new(currentSession.times.get(index),na,index == 0 ? currentSession.openPrice : currentBenchmarkPrice))
+
+gatherStatistics() =>
+    var bool wasLastOverperforming = true
+    if sessions.size() > 0
+        filter_session currentSession  = sessions.last()
+        bool overperforming     = currentSession.closePrice >= (currentSession.openPrice * (1 + currentSession.cumulativeBenchmarkReturns))    
+        overperformingSessions.push(overperforming ? 1 : 0)
+        if overperforming                    
+            if wasLastOverperforming and winningStreaks.size() > 0
+                winningStreaks.set(-1,winningStreaks.get(-1) + 1)
+            else
+                winningStreaks.push(1)            
+        else
+            if not wasLastOverperforming and losingStreaks.size() > 0
+                losingStreaks.set(-1,losingStreaks.get(-1) + 1)
+            else
+                losingStreaks.push(1)
+        wasLastOverperforming := overperforming
+
+gatherData() =>
+    if sessionStart
+        gatherStatistics()
+        if sessions.size() > 500
+            sessions.shift()
+        sessions.push(filter_session.new(time,time,open,close,high,low,na,open,open,na,array.new<int>(),array.new<float>(),array.new<float>(),array.new<chart.point>()))
+        sessions.last().benchmarkPoints.push(chart.point.new(time,na,open))
+                
+    if sessions.size() > 0
+        filter_session currentSession  = sessions.last()
+        currentSession.times.push(time)
+        currentSession.endTime      := time
+        currentSession.closePrice   := close
+        currentSession.top          := math.max(currentSession.top,high)
+        currentSession.bottom       := math.min(currentSession.bottom,low)
+        assetReturn                 = sessionStart ? (close - open)/open : (close - close[1])/close[1]
+        benchmarkReturn             = request.security(benchmarkInput,'',assetReturn)
+        currentSession.assetReturns.push(assetReturn)
+        currentSession.benchmarkReturns.push(benchmarkReturn)
+        if not sessionStart
+            switch displayModeInput
+                NET_RETURN  => netReturns(currentSession)
+                NORMALIZED  => normalizedReturns(currentSession)
+                STANDARDIZED => standarizedReturns(currentSession)
+
+cell(table t_able, int column, int row, string data, color = color.white, align = text.align_right) => t_able.cell(column,row,data,text_color = color, text_size = parsedDashboardSize, text_halign = align)
+
+drawDashboard() =>
+    var table t_able = table.new(parsedDashboardPosition,3,12, bgcolor = #1e222d, border_color = #373a46, border_width = 1, frame_color = #373a46, frame_width = 1)
+    t_able.merge_cells(0,0,2,0)
+    cell(t_able,0,0,'Sessions', align = text.align_center)
+    cell(t_able,1,1,'Over', align = text.align_center)
+    cell(t_able,2,1,'Under', align = text.align_center)
+    cell(t_able,0,2,'Performance', align = text.align_left)
+    t_able.merge_cells(0,3,2,3)
+    cell(t_able,0,3,'Streaks', align = text.align_center)
+    cell(t_able,1,4,'Winning', align = text.align_center)
+    cell(t_able,2,4,'Losing', align = text.align_center)
+    cell(t_able,0,5,'Number', align = text.align_left)
+    cell(t_able,0,6,'Median', align = text.align_left)
+    cell(t_able,0,7,'Mode', align = text.align_left)
+    cell(t_able,0,8,'>= 3 Sessions', align = text.align_left)
+    cell(t_able,0,9,'>= 4 Sessions', align = text.align_left)
+    cell(t_able,0,10,'>= 5 Sessions', align = text.align_left)
+    cell(t_able,0,11,'>= 6 Sessions', align = text.align_left)
+    cell(t_able,1,2,str.format('{0, number, 0.00%}',overperformingSessions.sum()/overperformingSessions.size()))
+    cell(t_able,2,2,str.format('{0, number, 0.00%}',1 - overperformingSessions.sum()/overperformingSessions.size()))
+    array<int> parsedWinningStreaks = array.new<int>()
+    for eachStreak in winningStreaks
+        if eachStreak > 1
+            parsedWinningStreaks.push(eachStreak)
+    array<int> parsedLosingStreaks = array.new<int>()
+    for eachStreak in losingStreaks
+        if eachStreak > 1
+            parsedLosingStreaks.push(eachStreak)
+    cell(t_able,1,5,str.format('{0, number, 0}',parsedWinningStreaks.size()))
+    cell(t_able,2,5,str.format('{0, number, 0}',parsedLosingStreaks.size()))
+    cell(t_able,1,6,str.format('{0, number, 0.00}',parsedWinningStreaks.median()))
+    cell(t_able,2,6,str.format('{0, number, 0.00}',parsedLosingStreaks.median()))
+    cell(t_able,1,7,str.format('{0, number, 0.00}',parsedWinningStreaks.mode()))
+    cell(t_able,2,7,str.format('{0, number, 0.00}',parsedLosingStreaks.mode()))
+    parsedWinningStreaks.sort()
+    parsedLosingStreaks.sort()
+    cell(t_able,1,8,str.format('{0, number, 0.00%}',1 - parsedWinningStreaks.binary_search_leftmost(3)/parsedWinningStreaks.size()))
+    cell(t_able,2,8,str.format('{0, number, 0.00%}',1 - parsedLosingStreaks.binary_search_leftmost(3)/parsedLosingStreaks.size()))
+    cell(t_able,1,9,str.format('{0, number, 0.00%}',1 - parsedWinningStreaks.binary_search_leftmost(4)/parsedWinningStreaks.size()))
+    cell(t_able,2,9,str.format('{0, number, 0.00%}',1 - parsedLosingStreaks.binary_search_leftmost(4)/parsedLosingStreaks.size()))
+    cell(t_able,1,10,str.format('{0, number, 0.00%}',1 - parsedWinningStreaks.binary_search_leftmost(5)/parsedWinningStreaks.size()))
+    cell(t_able,2,10,str.format('{0, number, 0.00%}',1 - parsedLosingStreaks.binary_search_leftmost(5)/parsedLosingStreaks.size()))
+    cell(t_able,1,11,str.format('{0, number, 0.00%}',1 - parsedWinningStreaks.binary_search_leftmost(6)/parsedWinningStreaks.size()))
+    cell(t_able,2,11,str.format('{0, number, 0.00%}',1 - parsedLosingStreaks.binary_search_leftmost(6)/parsedLosingStreaks.size()))
+    
+drawSession(filter_session currentSession) =>    
+    bool isBullish = currentSession.closePrice >= (currentSession.openPrice * (1 + currentSession.cumulativeBenchmarkReturns))
+    if (showBullishInput and isBullish) or (showBearishInput and not isBullish)
+        bool topExtension       = currentSession.benchmarkTop       > currentSession.top
+        bool bottomExtension    = currentSession.benchmarkBottom    < currentSession.bottom
+        if topExtension or bottomExtension
+            color benchmarkAreaColor    = isBullish ? FILTER_bearishColorInput : FILTER_bullishColorInput
+            float topLevel              = bottomExtension ? currentSession.bottom : currentSession.benchmarkTop
+            float bottomLevel           = bottomExtension ? currentSession.benchmarkBottom : currentSession.top
+            currentSession.benchmarkArea.delete()
+            currentSession.benchmarkArea := box.new(chart.point.new(currentSession.startTime,na,topLevel),chart.point.new(currentSession.endTime,na,bottomLevel),color(na),xloc = xloc.bar_time,bgcolor = benchmarkAreaColor)
+        color areaColor = isBullish ? FILTER_bullishColorInput : FILTER_bearishColorInput    
+        currentSession.area.delete()
+        currentSession.area := box.new(chart.point.new(currentSession.startTime,na,currentSession.top),chart.point.new(currentSession.endTime,na,currentSession.bottom),color(na),xloc = xloc.bar_time,bgcolor = areaColor)
+        currentSession.topLine.delete()
+        currentSession.bottomLine.delete()
+        currentSession.topLine      := line.new(chart.point.new(currentSession.startTime,na,currentSession.top),chart.point.new(currentSession.endTime,na,currentSession.top),xloc.bar_time, color = color.new(FILTER_bullishColorInput,0))
+        currentSession.bottomLine   := line.new(chart.point.new(currentSession.startTime,na,currentSession.bottom),chart.point.new(currentSession.endTime,na,currentSession.bottom),xloc.bar_time, color = color.new(FILTER_bearishColorInput,0))                    
+        if showBenchmarkInput
+            currentSession.benchmarkLine.delete()
+            currentSession.benchmarkLine := polyline.new(currentSession.benchmarkPoints,false,false,xloc.bar_time,isBullish ? FILTER_benchBearColorInput : FILTER_benchBullColorInput)
+    
+drawSessions() =>    
+    for eachSession in sessions.slice(0,sessions.size() - 1)
+        drawSession(eachSession)
+
+// ============================================
+// EXECUTION
+// ============================================
+gatherData()
+
+bool bullishArea = false
+if sessions.size() > 0
+    filter_session currentSession = sessions.last()
+    bullishArea := currentSession.closePrice >= (currentSession.openPrice * (1 + currentSession.cumulativeBenchmarkReturns))
+
+isGreenZone_series := showBullishInput and bullishArea
+isRedZone_series   := showBearishInput and not bullishArea
+
+if barstate.isfirst
+    for i = 0 to 499
+        zone_history.set(i, isGreenZone_series)
+else
+    for i = 0 to 498
+        zone_history.set(i, zone_history.get(i + 1))
+    zone_history.set(499, isGreenZone_series)
+
+[nrp_sum, nrp_color, nrp_stdev] = multi_kernel_regression(source, bandwidth, deviations, kernel_sel, labels, enable, line_style, text_color, bullish_color, bearish_color, size, repaint, isGreenZone_series, isRedZone_series, zone_history)
+
+plot(nrp_sum, "Non Repaint MA", nrp_color)
+plot(nrp_sum + nrp_stdev, "Non Repaint STDEV", nrp_color, display = enable ? display.all : display.none)
+plot(nrp_sum - nrp_stdev, "Non Repaint STDEV", nrp_color, display = enable ? display.all : display.none)
+
+longSignal = ta.crossover(nrp_sum, nrp_sum[1]) and isGreenZone_series
+shortSignal = ta.crossunder(nrp_sum, nrp_sum[1]) and isRedZone_series
+
+// ALERTS
+if longSignal and barstate.isconfirmed
+    string side = "Buy"
+    string jsonStr = str.format('"symbol":"{0}","side":"{1}","entryPercent":"1","orderType":"Market","slPercent":"{2}","tpPercent":"{3}","tpLevelsCount":"1","leverage":"15","tpFullCount":"1"', syminfo.ticker, side, str.tostring(slPercent, "#.##"), str.tostring(tpPercent, "#.##"))
+    alert(jsonStr, alert.freq_once_per_bar)
+
+if shortSignal and barstate.isconfirmed
+    string side = "Sell"
+    string jsonStr = str.format('"symbol":"{0}","side":"{1}","entryPercent":"1","orderType":"Market","slPercent":"{2}","tpPercent":"{3}","tpLevelsCount":"1","leverage":"15","tpFullCount":"1"', syminfo.ticker, side, str.tostring(slPercent, "#.##"), str.tostring(tpPercent, "#.##"))
+    alert(jsonStr, alert.freq_once_per_bar)
+
+alertcondition(longSignal and barstate.isconfirmed, title='LONG Signal', message='{{ticker}} - LONG Signal')
+alertcondition(shortSignal and barstate.isconfirmed, title='SHORT Signal', message='{{ticker}} - SHORT Signal')
+
+if barstate.islastconfirmedhistory
+    if dashboardInput
+        drawDashboard()
+    drawSessions()
+
+if barstate.islast
+    drawSession(sessions.last())
