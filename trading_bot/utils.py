@@ -6,10 +6,11 @@ import logging
 import hashlib
 import hmac
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from functools import wraps
 from dataclasses import dataclass, asdict
 import requests
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -732,6 +733,64 @@ def crossunder(series1: List[float], series2: List[float]) -> bool:
         return False
     
     return series1[-2] >= series2[-2] and series1[-1] < series2[-1]
+
+
+def get_session_start_index(df: pd.DataFrame, session_hours: int, start_hour: int = 0) -> int:
+    """
+    Найти индекс свечи, которая является началом текущей фиксированной сессии.
+
+    Args:
+        df: DataFrame с колонкой 'timestamp' (datetime).
+        session_hours: Интервал сессии в часах (например, 12).
+        start_hour: Час начала отсчета (UTC). 0 = полночь.
+
+    Returns:
+        Индекс начала сессии. Если не найден, возвращает 0.
+    """
+    if df.empty or 'timestamp' not in df.columns:
+        return 0
+
+    # Текущее время UTC
+    now = datetime.utcnow()
+
+    # Находим начало текущей сессии
+    # Округляем now до ближайшего session_hours, начиная с start_hour
+    # Алгоритм: берем текущий час, вычитаем start_hour, берем остаток от деления на session_hours,
+    # вычитаем этот остаток из текущего часа, возвращаем start_hour + вычисленное смещение.
+
+    current_hour = now.hour
+    # Смещение относительно start_hour
+    offset_from_start = (current_hour - start_hour) % session_hours
+    session_start_hour = current_hour - offset_from_start
+
+    # Если session_start_hour < start_hour (например, start_hour=8, session_hours=12, current_hour=2), значит сессия началась вчера
+    if session_start_hour < start_hour:
+        session_start_hour += 24
+        session_start_dt = now.replace(hour=session_start_hour % 24, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    else:
+        session_start_dt = now.replace(hour=session_start_hour, minute=0, second=0, microsecond=0)
+
+    # Ищем свечу с timestamp, ближайшим к session_start_dt
+    # df['timestamp'] отсортирован по возрастанию
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+    # Находим индекс первой свечи, которая >= session_start_dt
+    # Используем searchsorted для эффективности
+    idx = df['timestamp'].searchsorted(session_start_dt)
+
+    # Если idx == len(df), значит session_start_dt позже всех свечей (редкий кейс)
+    if idx >= len(df):
+        return len(df) - 1
+
+    # Проверяем предыдущую свечу, может она ближе?
+    # Обычно searchsorted дает индекс вставки, что идеально подходит для начала >=.
+    # Но если мы хотим самую близкую, можно сравнить разницу во времени с предыдущей.
+    # Однако для целей сессии нам нужна именно первая свеча >= начала сессии.
+    # Если idx > 0 и df.iloc[idx] - session_start_dt > session_start_dt - df.iloc[idx-1], то можно взять idx-1.
+    # Но в контексте свечей, начало сессии обычно совпадает с началом свечи или мы берем текущую.
+
+    # Для надежности просто вернем idx, если он в пределах.
+    return max(0, idx)
 
 
 # ============================================

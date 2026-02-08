@@ -25,6 +25,7 @@ class Executor:
             info = response['result']['list'][0]
             return {
                 'min_qty': float(info['lotSizeFilter']['minOrderQty']),
+                'max_qty': float(info['lotSizeFilter'].get('maxOrderQty', float('inf'))),
                 'qty_step': float(info['lotSizeFilter']['qtyStep']),
                 'tick_size': float(info['priceFilter']['tickSize']),
                 'min_notional': float(info['lotSizeFilter'].get('minNotionalValue', 0))
@@ -55,8 +56,14 @@ class Executor:
         if info:
             qty_step = info['qty_step']
             min_qty = info['min_qty']
+            max_qty = info['max_qty']
             quantity = math.floor(quantity / qty_step) * qty_step
             quantity = max(quantity, min_qty)
+            
+            # Проверяем максимальный лимит
+            if quantity > max_qty:
+                logger.warning(f"Calculated quantity {quantity} exceeds max_qty {max_qty}. Capping to max.")
+                quantity = max_qty
         
         logger.info(f"Position size: {quantity} (risk: ${risk_amount:.2f})")
         
@@ -105,12 +112,17 @@ class Executor:
             steps_count = (qty_decimal / qty_step).to_integral_value(rounding=ROUND_DOWN)
             rounded_qty = steps_count * qty_step
             
-            # Определяем точность
-            step_str = format(info['qty_step'], 'f').rstrip('0')
-            precision = len(step_str.split('.')[1]) if '.' in step_str else 0
-            
-            # Форматируем, убирая trailing zeros
-            return f"{rounded_qty:.{precision}f}"
+            # Определяем точность на основе qty_step
+            # Если qty_step >= 1, используем целое число
+            # Если qty_step < 1, определяем точность по количеству знаков после запятой
+            if qty_step >= 1:
+                # Для целых шагов (100, 1000 и т.д.) возвращаем целое число
+                return f"{int(rounded_qty)}"
+            else:
+                # Для дробных шагов определяем точность
+                step_str = format(info['qty_step'], 'f').rstrip('0')
+                precision = len(step_str.split('.')[1]) if '.' in step_str else 0
+                return f"{rounded_qty:.{precision}f}"
         return str(quantity)
     
     def execute(self, signal: Signal) -> bool:

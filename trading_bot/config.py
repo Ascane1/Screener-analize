@@ -25,11 +25,15 @@ class Config:
     KERNEL_TYPE: str = field(default_factory=lambda: os.environ.get('KERNEL_TYPE', 'Epanechnikov'))  # Тип ядра
     BANDWIDTH: int = field(default_factory=lambda: int(os.environ.get('BANDWIDTH', '20')))           # Период сглаживания
     SOURCE: str = field(default_factory=lambda: os.environ.get('SOURCE', 'close'))         # Источник данных
+    DEVIATIONS: float = field(default_factory=lambda: float(os.environ.get('DEVIATIONS', '2.0')))    # Множитель для полос отклонения (Deviation Bands)
 
     # ============ RELATIVE PERFORMANCE ============
     BENCHMARK_SYMBOL: str = field(default_factory=lambda: os.environ.get('BENCHMARK_SYMBOL', 'BTCUSDT'))  # Бенчмарк (BTC для крипты)
     DISPLAY_MODE: str = field(default_factory=lambda: os.environ.get('DISPLAY_MODE', 'Standardized'))  # Net Returns, Rescaled Returns, Standardized Returns
     SESSION_LENGTH: int = field(default_factory=lambda: int(os.environ.get('SESSION_LENGTH', '48')))  # Длина сессии в барах (12 часов на 15м = 48 баров)
+    SESSION_TYPE: str = field(default_factory=lambda: os.environ.get('SESSION_TYPE', 'Fixed'))  # Тип сессии: 'Fixed' или 'Rolling'
+    SESSION_START_HOUR: int = field(default_factory=lambda: int(os.environ.get('SESSION_START_HOUR', '0')))  # Час начала фиксированной сессии (UTC)
+    SESSION_HOURS: int = field(default_factory=lambda: int(os.environ.get('SESSION_HOURS', '12')))  # Интервал фиксированной сессии в часах
 
     # ============ ТОРГОВЛЯ ============
     TIMEFRAME: str = field(default_factory=lambda: os.environ.get('TIMEFRAME', '15'))  # Таймфрейм (минуты для Bybit: "1", "5", "15", "60", etc)

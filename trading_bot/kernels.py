@@ -128,11 +128,12 @@ def get_kernel_function(kernel_type: KernelType) -> Callable:
 
 
 class KernelRegression:
-    """Класс для расчёта kernel regression"""
+    """Класс для расчёта kernel regression с Deviation Bands"""
     
-    def __init__(self, kernel_type: KernelType = KernelType.LAPLACE, bandwidth: int = 14):
+    def __init__(self, kernel_type: KernelType = KernelType.LAPLACE, bandwidth: int = 14, deviations: float = 2.0):
         self.kernel_type = kernel_type
         self.bandwidth = bandwidth
+        self.deviations = deviations
         self.kernel_func = get_kernel_function(kernel_type)
         self._weights = None
         self._sum_weights = None
@@ -181,3 +182,38 @@ class KernelRegression:
             result[i] = weighted_sum / self._sum_weights
         
         return result
+    
+    def calculate_with_bands(self, prices: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Рассчитать kernel regression с Deviation Bands.
+        
+        Returns:
+            tuple: (kernel_ma, upper_band, lower_band)
+            - kernel_ma: основная линия регрессии
+            - upper_band: верхняя полоса (kernel_ma + stdev * deviations)
+            - lower_band: нижняя полоса (kernel_ma - stdev * deviations)
+        """
+        n = len(prices)
+        kernel_ma = np.full(n, np.nan)
+        upper_band = np.full(n, np.nan)
+        lower_band = np.full(n, np.nan)
+        
+        for i in range(self.bandwidth - 1, n):
+            # Берём окно из bandwidth значений
+            window = prices[i - self.bandwidth + 1:i + 1]
+            
+            # Расчёт взвешенной суммы (kernel regression)
+            weighted_sum = np.sum(window[::-1] * self._weights)
+            nrp_sum = weighted_sum / self._sum_weights
+            kernel_ma[i] = nrp_sum
+            
+            # Расчёт стандартного отклонения (как в Pine Script)
+            # sumsq += math.pow(src[i] - nrp_sum[i], 2)
+            sumsq = np.sum((window[::-1] - nrp_sum) ** 2 * self._weights)
+            variance = sumsq / self._sum_weights
+            stdev = np.sqrt(max(variance, 0)) * self.deviations
+            
+            upper_band[i] = nrp_sum + stdev
+            lower_band[i] = nrp_sum - stdev
+        
+        return kernel_ma, upper_band, lower_band

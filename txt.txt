@@ -1,0 +1,10 @@
+# API Configuration
+BYBIT_API_KEY=fFzUtokGUb49XtSlMd
+BYBIT_API_SECRET=016qyvRax81EkaGJWOqfT0QMTGAhHWRSvuUB
+BYBIT_ENDPOINT=https://api-demo.bybit.com
+TESTNET=False
+
+# Kernel Regression Configuration
+KERNEL_TYPE=Epanechnikov
+BANDWIDTH=20
+SOURCE=close

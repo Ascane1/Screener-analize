@@ -24,3 +24,11 @@ pip-delete-this-directory.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+
+# Project specific
+trades.json
+*.sqlite
+.pytest_results/

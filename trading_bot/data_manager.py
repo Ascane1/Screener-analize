@@ -211,6 +211,61 @@ class DataManager:
         
         return None
 
+    def get_total_market_cap_history(self, days: int = 7) -> Optional[pd.DataFrame]:
+        """
+        Получить исторические данные общей капитализации крипторынка (TOTAL) через CoinGecko API.
+        
+        Args:
+            days: Количество дней истории (max 365 для free tier)
+            
+        Returns:
+            DataFrame с колонками ['timestamp', 'market_cap']
+        """
+        cache_key = f"total_market_cap_{days}"
+        current_time = time.time()
+        
+        # Проверка кеша (5 минут)
+        if hasattr(self, '_market_cap_cache') and cache_key in self._market_cap_cache:
+            cached_data, cache_time = self._market_cap_cache[cache_key]
+            if current_time - cache_time < self._global_cache_ttl:
+                return cached_data
+        
+        try:
+            # Используем /coins/bitcoin/market_chart как прокси для рынка
+            # Примечание: для полноценного TOTAL market cap нужен CoinGecko Pro API
+            # Бесплатный API не предоставляет /global/market_cap_chart
+            url = f"https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+            params = {
+                "vs_currency": "usd",
+                "days": min(days, 365)  # Бесплатный API ограничен 365 днями
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if 'market_caps' in data:
+                # market_caps: [[timestamp_ms, market_cap], ...]
+                market_caps = data['market_caps']
+                
+                df = pd.DataFrame(market_caps, columns=['timestamp_ms', 'market_cap'])
+                df['timestamp'] = pd.to_datetime(df['timestamp_ms'], unit='ms')
+                df = df.sort_values('timestamp').reset_index(drop=True)
+                
+                # Кешируем
+                if not hasattr(self, '_market_cap_cache'):
+                    self._market_cap_cache = {}
+                self._market_cap_cache[cache_key] = (df, current_time)
+                
+                logger.info(f"TOTAL market cap history loaded: {len(df)} points for {days} days")
+                return df
+                
+        except Exception as e:
+            logger.error(f"Error fetching TOTAL market cap history: {e}")
+        
+        return None
+
     def get_kline_data(self, symbol: str, interval: str, start_time: int = None, end_time: int = None, limit: int = 200) -> list:
         """
         Получает свечные данные (Kline/OHLCV) для заданного символа и интервала.
